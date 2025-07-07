@@ -4155,9 +4155,203 @@ function _p9k_vcs_gitstatus() {
 }
 
 ################################################################
+# Direct Git VCS implementation using native git commands
+# This is faster than vcs_info and doesn't require GitStatus daemon
+
+function _p9k_git_direct() {
+  # Check if we're in a git repository
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    return 1
+  fi
+
+  local git_dir=$(git rev-parse --git-dir 2>/dev/null)
+  local repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+
+  # Get basic branch information
+  local branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+  local commit_hash=$(git rev-parse --short HEAD 2>/dev/null)
+
+  # Handle detached HEAD
+  if [[ -z $branch ]]; then
+    branch="HEAD"
+  fi
+
+  # Get remote information
+  local remote_branch=""
+  local remote_name=""
+  local remote_url=""
+
+  if git rev-parse --verify HEAD@{upstream} >/dev/null 2>&1; then
+    remote_branch=$(git rev-parse --symbolic-full-name HEAD@{upstream} 2>/dev/null)
+    remote_branch=${remote_branch#refs/remotes/}
+    remote_name=${remote_branch%%/*}
+    remote_url=$(git config --get remote.$remote_name.url 2>/dev/null)
+  fi
+
+  # Get ahead/behind counts
+  local ahead=0 behind=0
+  if [[ -n $remote_branch ]]; then
+    ahead=$(git rev-list --count HEAD..$remote_branch 2>/dev/null || echo 0)
+    behind=$(git rev-list --count $remote_branch..HEAD 2>/dev/null || echo 0)
+  fi
+
+  # Get tag information
+  local tag=$(git describe --tags --exact-match HEAD 2>/dev/null)
+
+  # Get stash count
+  local stashes=0
+  if [[ -s "$git_dir/logs/refs/stash" ]]; then
+    stashes=$(wc -l < "$git_dir/logs/refs/stash" 2>/dev/null || echo 0)
+  fi
+
+  # Get status information
+  local staged=0 unstaged=0 untracked=0 conflicted=0
+
+  # Check for staged changes
+  if git diff --cached --quiet 2>/dev/null; then
+    staged=0
+  else
+    staged=$(git diff --cached --name-only 2>/dev/null | wc -l)
+  fi
+
+  # Check for unstaged changes
+  if git diff --quiet 2>/dev/null; then
+    unstaged=0
+  else
+    unstaged=$(git diff --name-only 2>/dev/null | wc -l)
+  fi
+
+  # Check for untracked files
+  untracked=$(git ls-files --others --exclude-standard 2>/dev/null | wc -l)
+
+  # Check for conflicts
+  if git ls-files --unmerged 2>/dev/null | grep -q .; then
+    conflicted=$(git ls-files --unmerged 2>/dev/null | wc -l)
+  fi
+
+  # Determine state
+  local state="CLEAN"
+  if (( conflicted > 0 )); then
+    state="CONFLICTED"
+  elif (( staged > 0 || unstaged > 0 )); then
+    state="MODIFIED"
+  elif (( untracked > 0 )); then
+    state="UNTRACKED"
+  fi
+
+  # Build the prompt content
+  local content=""
+  local icon=""
+
+  # Get VCS icon based on remote URL
+  _p9k_vcs_icon "$remote_url"
+  icon=$_p9k__ret
+
+  # Add commit hash if requested
+  if (( _POWERLEVEL9K_SHOW_CHANGESET )); then
+    _p9k_get_icon prompt_vcs_$state VCS_COMMIT_ICON
+    content+="$_p9k__ret${commit_hash:0:$_POWERLEVEL9K_CHANGESET_HASH_LENGTH} "
+  fi
+
+  # Add branch name
+  if [[ -n $branch ]]; then
+    local branch_part=""
+    if (( !_POWERLEVEL9K_HIDE_BRANCH_ICON )); then
+      _p9k_get_icon prompt_vcs_$state VCS_BRANCH_ICON
+      branch_part+=$_p9k__ret
+    fi
+
+    # Handle branch shortening
+    if (( $+_POWERLEVEL9K_VCS_SHORTEN_LENGTH && $+_POWERLEVEL9K_VCS_SHORTEN_MIN_LENGTH &&
+          $#branch > _POWERLEVEL9K_VCS_SHORTEN_MIN_LENGTH &&
+          $#branch > _POWERLEVEL9K_VCS_SHORTEN_LENGTH )); then
+      case $_POWERLEVEL9K_VCS_SHORTEN_STRATEGY in
+        truncate_middle)
+          branch_part+="${branch[1,_POWERLEVEL9K_VCS_SHORTEN_LENGTH]}${_POWERLEVEL9K_VCS_SHORTEN_DELIMITER}${branch[-_POWERLEVEL9K_VCS_SHORTEN_LENGTH,-1]}"
+        ;;
+        truncate_from_right)
+          branch_part+="${branch[1,_POWERLEVEL9K_VCS_SHORTEN_LENGTH]}${_POWERLEVEL9K_VCS_SHORTEN_DELIMITER}"
+        ;;
+        *)
+          branch_part+=$branch
+        ;;
+      esac
+    else
+      branch_part+=$branch
+    fi
+    content+=$branch_part
+  fi
+
+  # Add tag if present
+  if [[ $_POWERLEVEL9K_VCS_HIDE_TAGS == 0 && -n $tag ]]; then
+    _p9k_get_icon prompt_vcs_$state VCS_TAG_ICON
+    content+=" $_p9k__ret$tag"
+  fi
+
+  # Add remote branch if different from local
+  if [[ -n $remote_branch && $remote_branch != $branch ]]; then
+    _p9k_get_icon prompt_vcs_$state VCS_REMOTE_BRANCH_ICON
+    content+=" $_p9k__ret${remote_branch#*/}"
+  fi
+
+  # Add status indicators
+  if (( staged > 0 || unstaged > 0 || untracked > 0 )); then
+    _p9k_get_icon prompt_vcs_$state VCS_DIRTY_ICON
+    content+=" $_p9k__ret"
+
+    if (( staged > 0 )); then
+      _p9k_get_icon prompt_vcs_$state VCS_STAGED_ICON
+      (( _POWERLEVEL9K_VCS_STAGED_MAX_NUM != 1 )) && _p9k__ret+=$staged
+      content+=" $_p9k__ret"
+    fi
+
+    if (( unstaged > 0 )); then
+      _p9k_get_icon prompt_vcs_$state VCS_UNSTAGED_ICON
+      (( _POWERLEVEL9K_VCS_UNSTAGED_MAX_NUM != 1 )) && _p9k__ret+=$unstaged
+      content+=" $_p9k__ret"
+    fi
+
+    if (( untracked > 0 )); then
+      _p9k_get_icon prompt_vcs_$state VCS_UNTRACKED_ICON
+      (( _POWERLEVEL9K_VCS_UNTRACKED_MAX_NUM != 1 )) && _p9k__ret+=$untracked
+      content+=" $_p9k__ret"
+    fi
+  fi
+
+  # Add ahead/behind indicators
+  if (( behind > 0 )); then
+    _p9k_get_icon prompt_vcs_$state VCS_INCOMING_CHANGES_ICON
+    (( _POWERLEVEL9K_VCS_COMMITS_BEHIND_MAX_NUM != 1 )) && _p9k__ret+=$behind
+    content+=" $_p9k__ret"
+  fi
+
+  if (( ahead > 0 )); then
+    _p9k_get_icon prompt_vcs_$state VCS_OUTGOING_CHANGES_ICON
+    (( _POWERLEVEL9K_VCS_COMMITS_AHEAD_MAX_NUM != 1 )) && _p9k__ret+=$ahead
+    content+=" $_p9k__ret"
+  fi
+
+  # Add stash indicator
+  if (( stashes > 0 )); then
+    _p9k_get_icon prompt_vcs_$state VCS_STASH_ICON
+    content+=" $_p9k__ret$stashes"
+  fi
+
+  # Display the segment
+  _p9k_prompt_segment "prompt_vcs_$state" "${__p9k_vcs_states[$state]}" "$_p9k_color1" "$icon" 0 '' "$content"
+  return 0
+}
+
+################################################################
 # Segment to show VCS information
 
 prompt_vcs() {
+  # Use direct git implementation if available and git is in backends
+  if (( ${_POWERLEVEL9K_VCS_BACKENDS[(I)git]} )); then
+    _p9k_git_direct && return
+  fi
+
+  # Fallback to original implementation for other VCS systems
   if (( _p9k_vcs_index && $+GITSTATUS_DAEMON_PID_POWERLEVEL9K )); then
     _p9k__prompt+='${(e)_p9k__vcs}'
     return
