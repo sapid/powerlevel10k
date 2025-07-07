@@ -4342,6 +4342,98 @@ function _p9k_git_direct() {
   return 0
 }
 
+# Cache for git status information
+typeset -gA _p9k__git_direct_cache
+typeset -g _p9k__git_direct_cache_dir=""
+typeset -g _p9k__git_direct_cache_time=0
+
+function _p9k_git_direct_cache_key() {
+  local git_dir=$(git rev-parse --git-dir 2>/dev/null)
+  local repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+  echo "${git_dir}:${repo_root}:${PWD}"
+}
+
+function _p9k_git_direct_cache_get() {
+  local cache_key=$(_p9k_git_direct_cache_key)
+  local cache_entry=$_p9k__git_direct_cache[$cache_key]
+
+  if [[ -n $cache_entry ]]; then
+    local cache_time=${cache_entry%%:*}
+    local cache_data=${cache_entry#*:}
+
+    # Cache is valid for 2 seconds
+    if (( EPOCHREALTIME - cache_time < 2 )); then
+      _p9k__ret=$cache_data
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+function _p9k_git_direct_cache_set() {
+  local cache_key=$(_p9k_git_direct_cache_key)
+  local cache_data=$1
+  _p9k__git_direct_cache[$cache_key]="$EPOCHREALTIME:$cache_data"
+}
+
+# Instant prompt support for VCS segment
+function instant_prompt_vcs() {
+  # For instant prompt, we show a simplified version without async updates
+  # This ensures the prompt appears instantly on shell startup
+
+  # Check if we're in a git repository
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    return 1
+  fi
+
+  local git_dir=$(git rev-parse --git-dir 2>/dev/null)
+  local branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+  local commit_hash=$(git rev-parse --short HEAD 2>/dev/null)
+
+  # Handle detached HEAD
+  if [[ -z $branch ]]; then
+    branch="HEAD"
+  fi
+
+  # Get remote information
+  local remote_url=""
+  if git rev-parse --verify HEAD@{upstream} >/dev/null 2>&1; then
+    local remote_branch=$(git rev-parse --symbolic-full-name HEAD@{upstream} 2>/dev/null)
+    local remote_name=${remote_branch#refs/remotes/}
+    remote_name=${remote_name%%/*}
+    remote_url=$(git config --get remote.$remote_name.url 2>/dev/null)
+  fi
+
+  # Get VCS icon
+  _p9k_vcs_icon "$remote_url"
+  local icon=$_p9k__ret
+
+  # Build simplified content for instant prompt
+  local content=""
+
+  # Add commit hash if requested
+  if (( _POWERLEVEL9K_SHOW_CHANGESET )); then
+    _p9k_get_icon prompt_vcs_CLEAN VCS_COMMIT_ICON
+    content+="$_p9k__ret${commit_hash:0:$_POWERLEVEL9K_CHANGESET_HASH_LENGTH} "
+  fi
+
+  # Add branch name
+  if [[ -n $branch ]]; then
+    local branch_part=""
+    if (( !_POWERLEVEL9K_HIDE_BRANCH_ICON )); then
+      _p9k_get_icon prompt_vcs_CLEAN VCS_BRANCH_ICON
+      branch_part+=$_p9k__ret
+    fi
+    branch_part+=$branch
+    content+=$branch_part
+  fi
+
+  # Display the segment (always CLEAN state for instant prompt)
+  _p9k_prompt_segment "prompt_vcs_CLEAN" "${__p9k_vcs_states[CLEAN]}" "$_p9k_color1" "$icon" 0 '' "$content"
+  return 0
+}
+
 ################################################################
 # Segment to show VCS information
 
