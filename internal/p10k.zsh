@@ -4164,26 +4164,23 @@ function _p9k_git_direct() {
     return 1
   fi
 
-  local git_dir=$(git rev-parse --git-dir 2>/dev/null)
-  local repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
-
-  # Get basic branch information
-  local branch=$(git symbolic-ref --short HEAD 2>/dev/null)
-  local commit_hash=$(git rev-parse --short HEAD 2>/dev/null)
+  # Parallel execution of basic git information
+  local git_dir repo_root branch commit_hash
+  {
+    git_dir=$(git rev-parse --git-dir 2>/dev/null) &
+    repo_root=$(git rev-parse --show-toplevel 2>/dev/null) &
+    branch=$(git symbolic-ref --short HEAD 2>/dev/null) &
+    commit_hash=$(git rev-parse --short HEAD 2>/dev/null) &
+    wait
+  }
 
   # Handle detached HEAD
   if [[ -z $branch ]]; then
     branch="HEAD"
   fi
 
-  # Debug: Print branch information (remove this after testing)
-  # echo "DEBUG: Branch=$branch, Remote=$remote_branch, Ahead=$ahead, Behind=$behind" >&2
-
   # Get remote information
-  local remote_branch=""
-  local remote_name=""
-  local remote_url=""
-
+  local remote_branch="" remote_name="" remote_url=""
   if git rev-parse --verify HEAD@{upstream} >/dev/null 2>&1; then
     remote_branch=$(git rev-parse --symbolic-full-name HEAD@{upstream} 2>/dev/null)
     # Handle both refs/remotes/remote/branch and refs/heads/branch formats
@@ -4198,7 +4195,7 @@ function _p9k_git_direct() {
     remote_url=$(git config --get remote.$remote_name.url 2>/dev/null)
   fi
 
-      # Get ahead/behind counts against local main/master
+  # Get ahead/behind counts against local main/master
   local ahead=0 behind=0
   if [[ -n $remote_branch ]]; then
     # Count against local main/master instead of remote to avoid expensive operations
@@ -4210,17 +4207,25 @@ function _p9k_git_direct() {
     fi
 
     if [[ -n $local_main && $branch != $local_main ]]; then
-      ahead=$(git rev-list --count HEAD..$local_main 2>/dev/null || echo 0)
-      behind=$(git rev-list --count $local_main..HEAD 2>/dev/null || echo 0)
+      # Parallel ahead/behind counting
+      {
+        ahead=$(git rev-list --count HEAD..$local_main 2>/dev/null || echo 0) &
+        behind=$(git rev-list --count $local_main..HEAD 2>/dev/null || echo 0) &
+        wait
+      }
     fi
   fi
 
-  # Get tag information
-  local tag=$(git describe --tags --exact-match HEAD 2>/dev/null)
+  # Parallel execution of metadata
+  local tag wip latest_commit_summary
+  {
+    tag=$(git describe --tags --exact-match HEAD 2>/dev/null) &
+    latest_commit_summary=$(git show --pretty=%s --no-patch HEAD 2>/dev/null) &
+    wait
+  }
 
   # Check for WIP (work in progress) in latest commit
   local wip=""
-  local latest_commit_summary=$(git show --pretty=%s --no-patch HEAD 2>/dev/null)
   if [[ $latest_commit_summary == *"wip"* || $latest_commit_summary == *"WIP"* ]]; then
     wip="wip"
   fi
@@ -4231,30 +4236,33 @@ function _p9k_git_direct() {
     stashes=$(wc -l < "$git_dir/logs/refs/stash" 2>/dev/null || echo 0)
   fi
 
-  # Get status information
+  # Parallel execution of status information
   local staged=0 unstaged=0 untracked=0 conflicted=0
+  {
+    # Check for staged changes
+    if git diff --cached --quiet 2>/dev/null; then
+      staged=0
+    else
+      staged=$(git diff --cached --name-only 2>/dev/null | wc -l)
+    fi &
 
-  # Check for staged changes
-  if git diff --cached --quiet 2>/dev/null; then
-    staged=0
-  else
-    staged=$(git diff --cached --name-only 2>/dev/null | wc -l)
-  fi
+    # Check for unstaged changes
+    if git diff --quiet 2>/dev/null; then
+      unstaged=0
+    else
+      unstaged=$(git diff --name-only 2>/dev/null | wc -l)
+    fi &
 
-  # Check for unstaged changes
-  if git diff --quiet 2>/dev/null; then
-    unstaged=0
-  else
-    unstaged=$(git diff --name-only 2>/dev/null | wc -l)
-  fi
+    # Check for untracked files
+    untracked=$(git ls-files --others --exclude-standard 2>/dev/null | wc -l) &
 
-  # Check for untracked files
-  untracked=$(git ls-files --others --exclude-standard 2>/dev/null | wc -l)
+    # Check for conflicts
+    if git ls-files --unmerged 2>/dev/null | grep -q .; then
+      conflicted=$(git ls-files --unmerged 2>/dev/null | wc -l)
+    fi &
 
-  # Check for conflicts
-  if git ls-files --unmerged 2>/dev/null | grep -q .; then
-    conflicted=$(git ls-files --unmerged 2>/dev/null | wc -l)
-  fi
+    wait
+  }
 
   # Determine state
   local state="CLEAN"
@@ -4354,11 +4362,11 @@ function _p9k_git_direct() {
 
   # Add ahead/behind indicators (format: ⇡ahead, ⇣behind, or = for up to date)
   if (( behind > 0 )); then
-    _p9k_get_icon prompt_vcs_$state VCS_INCOMING_CHANGES_ICON
+    _p9k_get_icon prompt_vcs_$state ⇣ # VCS_INCOMING_CHANGES_ICON
     (( _POWERLEVEL9K_VCS_COMMITS_BEHIND_MAX_NUM != 1 )) && _p9k__ret+=$behind
     content+=" $_p9k__ret"
   elif (( ahead > 0 )); then
-    _p9k_get_icon prompt_vcs_$state VCS_OUTGOING_CHANGES_ICON
+    _p9k_get_icon prompt_vcs_$state ⇡ # VCS_OUTGOING_CHANGES_ICON
     (( _POWERLEVEL9K_VCS_COMMITS_AHEAD_MAX_NUM != 1 )) && _p9k__ret+=$ahead
     content+=" $_p9k__ret"
   elif [[ -n $remote_branch ]]; then
@@ -4473,8 +4481,8 @@ function instant_prompt_vcs() {
 # Segment to show VCS information
 
 prompt_vcs() {
-  # Use direct git implementation if available and git is in backends
-  if (( ${_POWERLEVEL9K_VCS_BACKENDS[(I)git]} )); then
+  # Use direct git implementation if POWERLEVEL9K_DISABLE_GITSTATUS is true and git is in backends
+  if (( ${_POWERLEVEL9K_VCS_BACKENDS[(I)git]} && _POWERLEVEL9K_DISABLE_GITSTATUS )); then
     _p9k_git_direct && return
   fi
 
