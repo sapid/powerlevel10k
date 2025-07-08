@@ -4198,28 +4198,32 @@ function _p9k_git_direct() {
     remote_url=$(git config --get remote.$remote_name.url 2>/dev/null)
   fi
 
-    # Get ahead/behind counts (skip for main/master to avoid expensive operations in monorepos)
+      # Get ahead/behind counts against local main/master
   local ahead=0 behind=0
   if [[ -n $remote_branch ]]; then
-    # Skip ahead/behind calculation for main/master branches to avoid expensive operations
-    if [[ $branch != "main" && $branch != "master" && $remote_branch != "main" && $remote_branch != "master" ]]; then
-      # Use the full remote reference for accurate counting
-      local full_remote_ref=""
-      if [[ -n $remote_name ]]; then
-        full_remote_ref="refs/remotes/$remote_name/$remote_branch"
-      else
-        full_remote_ref="refs/heads/$remote_branch"
-      fi
+    # Count against local main/master instead of remote to avoid expensive operations
+    local local_main=""
+    if git rev-parse --verify refs/heads/main >/dev/null 2>&1; then
+      local_main="main"
+    elif git rev-parse --verify refs/heads/master >/dev/null 2>&1; then
+      local_main="master"
+    fi
 
-      if git rev-parse --verify "$full_remote_ref" >/dev/null 2>&1; then
-        ahead=$(git rev-list --count HEAD.."$full_remote_ref" 2>/dev/null || echo 0)
-        behind=$(git rev-list --count "$full_remote_ref"..HEAD 2>/dev/null || echo 0)
-      fi
+    if [[ -n $local_main && $branch != $local_main ]]; then
+      ahead=$(git rev-list --count HEAD..$local_main 2>/dev/null || echo 0)
+      behind=$(git rev-list --count $local_main..HEAD 2>/dev/null || echo 0)
     fi
   fi
 
   # Get tag information
   local tag=$(git describe --tags --exact-match HEAD 2>/dev/null)
+
+  # Check for WIP (work in progress) in latest commit
+  local wip=""
+  local latest_commit_summary=$(git show --pretty=%s --no-patch HEAD 2>/dev/null)
+  if [[ $latest_commit_summary == *"wip"* || $latest_commit_summary == *"WIP"* ]]; then
+    wip="wip"
+  fi
 
   # Get stash count
   local stashes=0
@@ -4311,6 +4315,11 @@ function _p9k_git_direct() {
     content+=" $_p9k__ret$tag"
   fi
 
+  # Add WIP indicator if present
+  if [[ -n $wip ]]; then
+    content+=" $wip"
+  fi
+
   # Add remote branch if different from local (format: branch:remote)
   if [[ -n $remote_branch && $remote_branch != $branch ]]; then
     local remote_branch_name=${remote_branch#*/}
@@ -4343,17 +4352,18 @@ function _p9k_git_direct() {
     fi
   fi
 
-  # Add ahead/behind indicators (format: ⇡ahead or ⇣behind)
+  # Add ahead/behind indicators (format: ⇡ahead, ⇣behind, or = for up to date)
   if (( behind > 0 )); then
     _p9k_get_icon prompt_vcs_$state VCS_INCOMING_CHANGES_ICON
     (( _POWERLEVEL9K_VCS_COMMITS_BEHIND_MAX_NUM != 1 )) && _p9k__ret+=$behind
     content+=" $_p9k__ret"
-  fi
-
-  if (( ahead > 0 )); then
+  elif (( ahead > 0 )); then
     _p9k_get_icon prompt_vcs_$state VCS_OUTGOING_CHANGES_ICON
     (( _POWERLEVEL9K_VCS_COMMITS_AHEAD_MAX_NUM != 1 )) && _p9k__ret+=$ahead
     content+=" $_p9k__ret"
+  elif [[ -n $remote_branch ]]; then
+    # Show = when up to date with main/master
+    content+=" ="
   fi
 
   # Add stash indicator
