@@ -4373,6 +4373,236 @@ function _p9k_git_direct() {
   return 0
 }
 
+function _p9k_git_direct_parallel() {
+  # Check if we're in a git repository
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    return 1
+  fi
+
+  # Create temporary directory for parallel results
+  local tmpdir=$(mktemp -d)
+  trap "rm -rf $tmpdir" EXIT
+
+  # =============================================================================
+  # PHASE 1: Launch parallel git commands
+  # =============================================================================
+
+  # Basic git information (4 commands in parallel)
+  {
+    git rev-parse --git-dir 2>/dev/null || echo ""
+  } > "$tmpdir/git_dir" &
+  local git_dir_pid=$!
+
+  {
+    git symbolic-ref --short HEAD 2>/dev/null || echo "HEAD"
+  } > "$tmpdir/branch" &
+  local branch_pid=$!
+
+  {
+    git rev-parse --short HEAD 2>/dev/null || echo ""
+  } > "$tmpdir/commit_hash" &
+  local commit_pid=$!
+
+  {
+    git status --porcelain 2>/dev/null || echo ""
+  } > "$tmpdir/status" &
+  local status_pid=$!
+
+  # Remote information (can run in parallel with basic info)
+  {
+    if git rev-parse --verify HEAD@{upstream} >/dev/null 2>&1; then
+      remote_branch=$(git rev-parse --symbolic-full-name HEAD@{upstream} 2>/dev/null)
+      # Handle both refs/remotes/remote/branch and refs/heads/branch formats
+      if [[ $remote_branch == refs/remotes/* ]]; then
+        remote_branch=${remote_branch#refs/remotes/}
+        remote_name=${remote_branch%%/*}
+        remote_branch=${remote_branch#*/}
+      elif [[ $remote_branch == refs/heads/* ]]; then
+        remote_branch=${remote_branch#refs/heads/}
+        remote_name="origin"
+      fi
+      echo "$remote_name|$remote_branch"
+
+      # Also get remote URL
+      git config --get remote.$remote_name.url 2>/dev/null || echo ""
+    else
+      echo "|"
+      echo ""
+    fi
+  } > "$tmpdir/remote_info" &
+  local remote_pid=$!
+
+  # Metadata (can run in parallel)
+  {
+    git describe --tags --exact-match HEAD 2>/dev/null || echo ""
+  } > "$tmpdir/tag" &
+  local tag_pid=$!
+
+  {
+    git show --pretty=%s --no-patch HEAD 2>/dev/null || echo ""
+  } > "$tmpdir/commit_msg" &
+  local commit_msg_pid=$!
+
+  # =============================================================================
+  # PHASE 2: Wait for basic info and determine if we need ahead/behind
+  # =============================================================================
+
+  # Wait for branch info first to determine if we need ahead/behind calculation
+  wait $branch_pid
+  local branch=$(<"$tmpdir/branch")
+
+  # Check for local main/master and start ahead/behind calculation if needed
+  local ahead_behind_pid=""
+  if [[ $branch != "main" && $branch != "master" ]]; then
+    {
+      local local_main=""
+      if git rev-parse --verify refs/heads/main >/dev/null 2>&1; then
+        local_main="main"
+      elif git rev-parse --verify refs/heads/master >/dev/null 2>&1; then
+        local_main="master"
+      fi
+
+      if [[ -n $local_main ]]; then
+        ahead=$(git rev-list --count HEAD..$local_main 2>/dev/null || echo 0)
+        behind=$(git rev-list --count $local_main..HEAD 2>/dev/null || echo 0)
+        echo "$ahead|$behind"
+      else
+        echo "0|0"
+      fi
+    } > "$tmpdir/ahead_behind" &
+    ahead_behind_pid=$!
+  else
+    echo "0|0" > "$tmpdir/ahead_behind"
+  fi
+
+  # =============================================================================
+  # PHASE 3: Wait for all remaining processes and collect results
+  # =============================================================================
+
+  # Wait for all background processes
+  wait $git_dir_pid $commit_pid $status_pid $remote_pid $tag_pid $commit_msg_pid
+  [[ -n $ahead_behind_pid ]] && wait $ahead_behind_pid
+
+  # Read all results
+  local git_dir=$(<"$tmpdir/git_dir")
+  local commit_hash=$(<"$tmpdir/commit_hash")
+  local status_output=$(<"$tmpdir/status")
+  local tag=$(<"$tmpdir/tag")
+  local commit_msg=$(<"$tmpdir/commit_msg")
+
+  # Parse remote info
+  local remote_info=$(<"$tmpdir/remote_info")
+  local remote_line1=${remote_info%%$'\n'*}
+  local remote_line2=${remote_info#*$'\n'}
+  local remote_name=${remote_line1%|*}
+  local remote_branch=${remote_line1#*|}
+  local remote_url="$remote_line2"
+
+  # Parse ahead/behind
+  local ahead_behind=$(<"$tmpdir/ahead_behind")
+  local ahead=${ahead_behind%|*}
+  local behind=${ahead_behind#*|}
+
+  # =============================================================================
+  # PHASE 4: Process results (this part runs sequentially)
+  # =============================================================================
+
+  # Parse status output
+  local staged=0 unstaged=0 untracked=0 conflicted=0
+  if [[ -n $status_output ]]; then
+    while IFS= read -r line; do
+      local index_status=${line:0:1}
+      local work_status=${line:1:1}
+
+      case $index_status in
+        [MADRC]) ((staged++)) ;;
+      esac
+
+      case $work_status in
+        [MD]) ((unstaged++)) ;;
+      esac
+
+      case $line in
+        \?\?*) ((untracked++)) ;;
+        UU*|AA*|DD*) ((conflicted++)) ;;
+      esac
+    done <<< "$status_output"
+  fi
+
+  # Check for WIP
+  local wip=""
+  if [[ $commit_msg == *"wip"* || $commit_msg == *"WIP"* ]]; then
+    wip="wip"
+  fi
+
+  # Get stash count (this is fast, no need to parallelize)
+  local stashes=0
+  if [[ -s "$git_dir/logs/refs/stash" ]]; then
+    stashes=$(wc -l < "$git_dir/logs/refs/stash" 2>/dev/null || echo 0)
+  fi
+
+  # =============================================================================
+  # PHASE 5: Build output (same as original)
+  # =============================================================================
+
+  # Determine state
+  local state="CLEAN"
+  if (( conflicted > 0 )); then
+    state="CONFLICTED"
+  elif (( staged > 0 || unstaged > 0 )); then
+    state="MODIFIED"
+  elif (( untracked > 0 )); then
+    state="UNTRACKED"
+  fi
+
+  # Build the prompt content
+  local content=""
+
+  # Add branch name
+  if [[ -n $branch ]]; then
+    content+=$branch
+  fi
+
+  # Add remote branch if different from local (format: branch:remote)
+  if [[ -n $remote_branch && $remote_branch != $branch ]]; then
+    local remote_branch_name=${remote_branch#*/}
+    # Remove any "heads/" prefix from remote branch name
+    remote_branch_name=${remote_branch_name#heads/}
+    content+=":$remote_branch_name"
+  fi
+
+  # Add WIP indicator if present
+  if [[ -n $wip ]]; then
+    content+=" $wip"
+  fi
+
+  # Add ahead/behind indicators
+  if (( behind > 0 )); then
+    content+=" ⇣$behind"
+  elif (( ahead > 0 )); then
+    content+=" ⇡$ahead"
+  elif [[ -n $remote_branch ]]; then
+    content+=" ="
+  fi
+
+  # Add status indicators
+  if (( staged > 0 )); then
+    content+=" +$staged"
+  fi
+  if (( unstaged > 0 )); then
+    content+=" !$unstaged"
+  fi
+  if (( untracked > 0 )); then
+    content+=" ?$untracked"
+  fi
+  if (( stashes > 0 )); then
+    content+=" *$stashes"
+  fi
+
+  echo "$content"
+  return 0
+}
+
 # Cache for git status information
 typeset -gA _p9k__git_direct_cache
 typeset -g _p9k__git_direct_cache_dir=""
@@ -4469,9 +4699,9 @@ function instant_prompt_vcs() {
 # Segment to show VCS information
 
 prompt_vcs() {
-  # Use direct git implementation if POWERLEVEL9K_DISABLE_GITSTATUS is true and git is in backends
-  if (( ${_POWERLEVEL9K_VCS_BACKENDS[(I)git]} && _POWERLEVEL9K_DISABLE_GITSTATUS )); then
-    _p9k_git_direct && return
+  # Use direct git implementation if git is in backends
+  if (( ${_POWERLEVEL9K_VCS_BACKENDS[(I)git]})); then
+    _p9k_git_direct_parallel && return
   fi
 
   # Fallback to original implementation for other VCS systems
