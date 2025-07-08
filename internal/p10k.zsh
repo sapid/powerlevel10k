@@ -4164,13 +4164,11 @@ function _p9k_git_direct() {
     return 1
   fi
 
-  # Parallel execution of basic git information
-  local git_dir repo_root branch commit_hash
-  git_dir=$(git rev-parse --git-dir 2>/dev/null) &
-  repo_root=$(git rev-parse --show-toplevel 2>/dev/null) &
-  branch=$(git symbolic-ref --short HEAD 2>/dev/null) &
-  commit_hash=$(git rev-parse --short HEAD 2>/dev/null) &
-  wait
+  # Get basic git information
+  local git_dir=$(git rev-parse --git-dir 2>/dev/null)
+  local repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+  local branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+  local commit_hash=$(git rev-parse --short HEAD 2>/dev/null)
 
   # Handle detached HEAD
   if [[ -z $branch ]]; then
@@ -4205,18 +4203,15 @@ function _p9k_git_direct() {
     fi
 
     if [[ -n $local_main && $branch != $local_main ]]; then
-      # Parallel ahead/behind counting
-      ahead=$(git rev-list --count HEAD..$local_main 2>/dev/null || echo 0) &
-      behind=$(git rev-list --count $local_main..HEAD 2>/dev/null || echo 0) &
-      wait
+      # Get ahead/behind counts
+      ahead=$(git rev-list --count HEAD..$local_main 2>/dev/null || echo 0)
+      behind=$(git rev-list --count $local_main..HEAD 2>/dev/null || echo 0)
     fi
   fi
 
-  # Parallel execution of metadata
-  local tag wip latest_commit_summary
-  tag=$(git describe --tags --exact-match HEAD 2>/dev/null) &
-  latest_commit_summary=$(git show --pretty=%s --no-patch HEAD 2>/dev/null) &
-  wait
+  # Get metadata
+  local tag=$(git describe --tags --exact-match HEAD 2>/dev/null)
+  local latest_commit_summary=$(git show --pretty=%s --no-patch HEAD 2>/dev/null)
 
   # Check for WIP (work in progress) in latest commit
   local wip=""
