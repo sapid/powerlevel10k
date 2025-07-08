@@ -4166,13 +4166,11 @@ function _p9k_git_direct() {
 
   # Parallel execution of basic git information
   local git_dir repo_root branch commit_hash
-  {
-    git_dir=$(git rev-parse --git-dir 2>/dev/null) &
-    repo_root=$(git rev-parse --show-toplevel 2>/dev/null) &
-    branch=$(git symbolic-ref --short HEAD 2>/dev/null) &
-    commit_hash=$(git rev-parse --short HEAD 2>/dev/null) &
-    wait
-  }
+  git_dir=$(git rev-parse --git-dir 2>/dev/null) &
+  repo_root=$(git rev-parse --show-toplevel 2>/dev/null) &
+  branch=$(git symbolic-ref --short HEAD 2>/dev/null) &
+  commit_hash=$(git rev-parse --short HEAD 2>/dev/null) &
+  wait
 
   # Handle detached HEAD
   if [[ -z $branch ]]; then
@@ -4208,21 +4206,17 @@ function _p9k_git_direct() {
 
     if [[ -n $local_main && $branch != $local_main ]]; then
       # Parallel ahead/behind counting
-      {
-        ahead=$(git rev-list --count HEAD..$local_main 2>/dev/null || echo 0) &
-        behind=$(git rev-list --count $local_main..HEAD 2>/dev/null || echo 0) &
-        wait
-      }
+      ahead=$(git rev-list --count HEAD..$local_main 2>/dev/null || echo 0) &
+      behind=$(git rev-list --count $local_main..HEAD 2>/dev/null || echo 0) &
+      wait
     fi
   fi
 
   # Parallel execution of metadata
   local tag wip latest_commit_summary
-  {
-    tag=$(git describe --tags --exact-match HEAD 2>/dev/null) &
-    latest_commit_summary=$(git show --pretty=%s --no-patch HEAD 2>/dev/null) &
-    wait
-  }
+  tag=$(git describe --tags --exact-match HEAD 2>/dev/null) &
+  latest_commit_summary=$(git show --pretty=%s --no-patch HEAD 2>/dev/null) &
+  wait
 
   # Check for WIP (work in progress) in latest commit
   local wip=""
@@ -4236,33 +4230,32 @@ function _p9k_git_direct() {
     stashes=$(wc -l < "$git_dir/logs/refs/stash" 2>/dev/null || echo 0)
   fi
 
-  # Parallel execution of status information
+      # Get status information (optimized with single git status call)
   local staged=0 unstaged=0 untracked=0 conflicted=0
-  {
-    # Check for staged changes
-    if git diff --cached --quiet 2>/dev/null; then
-      staged=0
-    else
-      staged=$(git diff --cached --name-only 2>/dev/null | wc -l)
-    fi &
 
-    # Check for unstaged changes
-    if git diff --quiet 2>/dev/null; then
-      unstaged=0
-    else
-      unstaged=$(git diff --name-only 2>/dev/null | wc -l)
-    fi &
+  # Use git status --porcelain for efficient status checking
+  local status_output=$(git status --porcelain 2>/dev/null)
 
-    # Check for untracked files
-    untracked=$(git ls-files --others --exclude-standard 2>/dev/null | wc -l) &
+  # Parse the status output
+  if [[ -n $status_output ]]; then
+    while IFS= read -r line; do
+      local index_status=${line:0:1}
+      local work_status=${line:1:1}
 
-    # Check for conflicts
-    if git ls-files --unmerged 2>/dev/null | grep -q .; then
-      conflicted=$(git ls-files --unmerged 2>/dev/null | wc -l)
-    fi &
+      case $index_status in
+        [MADRC]) ((staged++)) ;;
+      esac
 
-    wait
-  }
+      case $work_status in
+        [MD]) ((unstaged++)) ;;
+      esac
+
+      case $line in
+        \?\?*) ((untracked++)) ;;
+        UU*|AA*|DD*) ((conflicted++)) ;;
+      esac
+    done <<< "$status_output"
+  fi
 
   # Determine state
   local state="CLEAN"
