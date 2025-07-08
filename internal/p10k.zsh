@@ -4176,6 +4176,9 @@ function _p9k_git_direct() {
     branch="HEAD"
   fi
 
+  # Debug: Print branch information (remove this after testing)
+  # echo "DEBUG: Branch=$branch, Remote=$remote_branch, Ahead=$ahead, Behind=$behind" >&2
+
   # Get remote information
   local remote_branch=""
   local remote_name=""
@@ -4183,16 +4186,36 @@ function _p9k_git_direct() {
 
   if git rev-parse --verify HEAD@{upstream} >/dev/null 2>&1; then
     remote_branch=$(git rev-parse --symbolic-full-name HEAD@{upstream} 2>/dev/null)
-    remote_branch=${remote_branch#refs/remotes/}
-    remote_name=${remote_branch%%/*}
+    # Handle both refs/remotes/remote/branch and refs/heads/branch formats
+    if [[ $remote_branch == refs/remotes/* ]]; then
+      remote_branch=${remote_branch#refs/remotes/}
+      remote_name=${remote_branch%%/*}
+      remote_branch=${remote_branch#*/}
+    elif [[ $remote_branch == refs/heads/* ]]; then
+      remote_branch=${remote_branch#refs/heads/}
+      remote_name="origin"
+    fi
     remote_url=$(git config --get remote.$remote_name.url 2>/dev/null)
   fi
 
-  # Get ahead/behind counts
+    # Get ahead/behind counts (skip for main/master to avoid expensive operations in monorepos)
   local ahead=0 behind=0
   if [[ -n $remote_branch ]]; then
-    ahead=$(git rev-list --count HEAD..$remote_branch 2>/dev/null || echo 0)
-    behind=$(git rev-list --count $remote_branch..HEAD 2>/dev/null || echo 0)
+    # Skip ahead/behind calculation for main/master branches to avoid expensive operations
+    if [[ $branch != "main" && $branch != "master" && $remote_branch != "main" && $remote_branch != "master" ]]; then
+      # Use the full remote reference for accurate counting
+      local full_remote_ref=""
+      if [[ -n $remote_name ]]; then
+        full_remote_ref="refs/remotes/$remote_name/$remote_branch"
+      else
+        full_remote_ref="refs/heads/$remote_branch"
+      fi
+
+      if git rev-parse --verify "$full_remote_ref" >/dev/null 2>&1; then
+        ahead=$(git rev-list --count HEAD.."$full_remote_ref" 2>/dev/null || echo 0)
+        behind=$(git rev-list --count "$full_remote_ref"..HEAD 2>/dev/null || echo 0)
+      fi
+    fi
   fi
 
   # Get tag information
@@ -4288,10 +4311,12 @@ function _p9k_git_direct() {
     content+=" $_p9k__ret$tag"
   fi
 
-  # Add remote branch if different from local
+  # Add remote branch if different from local (format: branch:remote)
   if [[ -n $remote_branch && $remote_branch != $branch ]]; then
-    _p9k_get_icon prompt_vcs_$state VCS_REMOTE_BRANCH_ICON
-    content+=" $_p9k__ret${remote_branch#*/}"
+    local remote_branch_name=${remote_branch#*/}
+    # Remove any "heads/" prefix from remote branch name
+    remote_branch_name=${remote_branch_name#heads/}
+    content+=":$remote_branch_name"
   fi
 
   # Add status indicators
@@ -4318,7 +4343,7 @@ function _p9k_git_direct() {
     fi
   fi
 
-  # Add ahead/behind indicators
+  # Add ahead/behind indicators (format: ⇡ahead or ⇣behind)
   if (( behind > 0 )); then
     _p9k_get_icon prompt_vcs_$state VCS_INCOMING_CHANGES_ICON
     (( _POWERLEVEL9K_VCS_COMMITS_BEHIND_MAX_NUM != 1 )) && _p9k__ret+=$behind
